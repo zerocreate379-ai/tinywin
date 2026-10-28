@@ -1,0 +1,119 @@
+name: RDP-SBBOSS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" -ErrorAction SilentlyContinue
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create Custom RDP User
+        run: |
+          $username = "SBBOSS"
+          $password = "Shoaib@1021##/"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # ইউজার তৈরি এবং পারমিশন প্রদান
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          if (-not (Get-LocalUser -Name $username)) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Extreme Performance Optimization
+        run: |
+          Write-Host "Applying Extreme Performance Tweaks..."
+          
+          # 1. Disable Windows Defender (Antivirus)
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableBlockAtFirstSeen $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue
+          
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Force -ErrorAction SilentlyContinue | Out-Null
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableAntiSpyware" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+          
+          # 2. Disable Windows Update & SysMain
+          Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+          Set-Service -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+          Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
+          Set-Service -Name SysMain -StartupType Disabled -ErrorAction SilentlyContinue
+          
+          # 3. Set Power Plan to High Performance
+          powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          
+          # 4. Disable Search Indexer & Telemetry (Saves CPU & Network)
+          Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+          Set-Service -Name WSearch -StartupType Disabled -ErrorAction SilentlyContinue
+          Stop-Service -Name DiagTrack -Force -ErrorAction SilentlyContinue
+          Set-Service -Name DiagTrack -StartupType Disabled -ErrorAction SilentlyContinue
+          
+          # 5. Disable RDP Audio, Printer & Camera Sync (Reduces Ping/Lag)
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Force -ErrorAction SilentlyContinue | Out-Null
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fDisableAudioCapture" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fDisableCpm" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fDisableCam" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+          
+          # 6. Force Best Performance (Zero Animations)
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0 -Force -ErrorAction SilentlyContinue
+          New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -PropertyType DWORD -Force -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: SBBOSS"
+          Write-Host "Password: Shoaib@1021##/"
+          Write-Host "==================`n"
+          
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Tailscale IP to Connect"
+              Start-Sleep -Seconds 300
+          }
+
